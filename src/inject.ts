@@ -157,7 +157,7 @@ const run = async () => {
       const repo = window.location.href.split("/")[4]
 
       primaryLinks.forEach(linkElement => {
-        const file = linkElement.innerText
+        const file = (linkElement.getAttribute("title") || linkElement.innerText)
           .split("→") // when file was renamed
           .pop()
           ?.trim()
