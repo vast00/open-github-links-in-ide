@@ -105,7 +105,124 @@ const run = async () => {
 
   const filePathRegExp = /.+\/([^/]+)\/(blob|tree)\/[^/]+\/(.*)/
 
-  const addEditorIcons = () => {
+  // cache: diff hash -> full file path, persists across addEditorIcons calls for the same PR
+  const diffHashToPathCache: Record<string, string> = {}
+
+  // build diff-hash -> full-path mapping from the in-page file tree (new experience)
+  const buildCacheFromNewFileTree = (root: ParentNode) => {
+    // new experience: li[role="treeitem"] with id = full file path
+    const treeItems = root.querySelectorAll<HTMLElement>('li[role="treeitem"]')
+    treeItems.forEach(item => {
+      // file items have no nested group (directories do)
+      if (item.querySelector('ul[role="group"]')) return
+      const link = item.querySelector('a[href*="#diff-"]')
+      const href = link?.getAttribute("href")
+      const hash = href?.match(/#(diff-[a-f0-9]+)/)?.[1]
+      if (hash && item.id) {
+        diffHashToPathCache[hash] = item.id
+      }
+    })
+  }
+
+  // build diff-hash -> full-path mapping from old-style <file-tree> element
+  const buildCacheFromOldFileTree = (fileTree: Element) => {
+    fileTree.querySelectorAll<HTMLElement>('.js-tree-node[data-tree-entry-type="file"]').forEach(fileNode => {
+      const href = fileNode.querySelector("a")?.getAttribute("href")
+      const hash = href?.match(/#(diff-[a-f0-9]+)/)?.[1]
+      if (!hash) return
+
+      // get filename from the last non-empty span
+      let fileName = ""
+      fileNode.querySelectorAll("span").forEach(s => {
+        const t = s.textContent?.trim()
+        if (t) fileName = t
+      })
+
+      // walk up all ancestor directory nodes to build full path
+      const dirParts: string[] = []
+      let ancestor: HTMLElement | null = fileNode.parentElement
+      while (ancestor && ancestor !== fileTree) {
+        if (ancestor.matches('.js-tree-node[data-tree-entry-type="directory"]')) {
+          let dirName = ""
+          ancestor.querySelectorAll(":scope > button span, :scope > a span").forEach(s => {
+            const t = s.textContent?.trim()
+            if (t) dirName = t
+          })
+          if (dirName) dirParts.unshift(dirName)
+        }
+        ancestor = ancestor.parentElement
+      }
+
+      const dirPath = dirParts.join("/")
+      diffHashToPathCache[hash] = dirPath ? `${dirPath}/${fileName}` : fileName
+    })
+  }
+
+  // stream fetch helper: reads response body until endMarker is found, then aborts
+  const streamUntil = async (url: string, endMarker: (html: string) => boolean): Promise<string> => {
+    const response = await fetch(url, {
+      credentials: "same-origin",
+      headers: { "Turbo-Frame": "repo-content-turbo-frame" },
+    })
+    if (!response.ok || !response.body) return ""
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let html = ""
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      html += decoder.decode(value, { stream: true })
+      if (endMarker(html)) {
+        void reader.cancel()
+        break
+      }
+    }
+    return html
+  }
+
+  // resolve truncated file paths by fetching the PR files/changes page and parsing its file tree
+  let resolvePromise: Promise<void> | null = null
+
+  const resolveFilePathsFromFilesPage = async (filesPageUrl: string): Promise<void> => {
+    if (Object.keys(diffHashToPathCache).length > 0) return // already resolved
+    if (resolvePromise) return resolvePromise // dedupe concurrent calls
+
+    resolvePromise = (async () => {
+      try {
+        const isOldExp = filesPageUrl.includes("/files")
+        const isNewExp = filesPageUrl.includes("/changes")
+
+        let html: string
+        if (isOldExp && !isNewExp) {
+          // old experience: stream until </file-tree> custom element closes
+          html = await streamUntil(filesPageUrl, h => h.includes("</file-tree>"))
+          const doc = new DOMParser().parseFromString(html, "text/html")
+          const fileTree = doc.querySelector("file-tree")
+          if (fileTree) buildCacheFromOldFileTree(fileTree)
+        } else {
+          // new experience (or unknown): stream until diff content starts after file tree
+          // tree uses role="treeitem", diffs use role="grid"
+          let seenTreeItem = false
+          html = await streamUntil(filesPageUrl, h => {
+            if (!seenTreeItem && h.includes('role="treeitem"')) seenTreeItem = true
+            return seenTreeItem && h.includes('role="grid"')
+          })
+          const doc = new DOMParser().parseFromString(html, "text/html")
+          buildCacheFromNewFileTree(doc)
+        }
+
+        debug("Resolved file paths from files page:", diffHashToPathCache)
+      } catch (e) {
+        debug("Failed to resolve file paths:", e)
+      }
+    })()
+
+    return resolvePromise
+  }
+
+  const addEditorIcons = async () => {
     debug("Adding editor icons")
 
     let addedIconsCounter = 0
@@ -144,30 +261,75 @@ const run = async () => {
     // --------------------------------------------
 
     if (OPTIONS.showIconOnFileBlockHeaders || OPTIONS.showIconOnLineNumbers) {
+      // detect which view we're in
+      const isNewFilesChangedView = !!document.querySelector("#diff-comparison-viewer-container")
       let inFilesChangedView = true
 
-      // select file blocks
-      let primaryLinks = document.querySelectorAll<HTMLAnchorElement>(".file a.Link--primary[title]") // in files changed view
+      // select file header links depending on the view
+      let primaryLinks: NodeListOf<HTMLAnchorElement>
+
+      if (isNewFilesChangedView) {
+        // new experience: file header links inside h3 DiffFileHeader
+        primaryLinks = document.querySelectorAll<HTMLAnchorElement>(
+          '[class*="Diff-module__diff"] h3[class*="DiffFileHeader"] a.Link--primary',
+        )
+        // build path cache from the in-page file tree
+        if (primaryLinks.length) {
+          buildCacheFromNewFileTree(document)
+        }
+      } else {
+        // old experience: file header links with title attribute
+        primaryLinks = document.querySelectorAll<HTMLAnchorElement>(".file a.Link--primary[title]")
+      }
 
       if (!primaryLinks.length) {
-        primaryLinks = document.querySelectorAll<HTMLAnchorElement>(".js-comment-container a.Link--primary.text-mono") // in discussion
+        // discussion/conversation view
+        primaryLinks = document.querySelectorAll<HTMLAnchorElement>(".js-comment-container a.Link--primary.text-mono")
         inFilesChangedView = false
       }
 
       const repo = window.location.href.split("/")[4]
 
+      // in discussion view, resolve truncated file paths from the files changed page
+      if (!inFilesChangedView && primaryLinks.length) {
+        // detect if the user has new experience enabled by checking the "Files changed" tab link
+        const filesChangedTabLink = document.querySelector<HTMLAnchorElement>('a[href*="/changes"], a[href*="/files"]')
+        const tabHref = filesChangedTabLink?.getAttribute("href") ?? ""
+        const useNewExp = tabHref.includes("/changes")
+
+        // construct the files page URL from the PR base path
+        const prBasePath = window.location.pathname.replace(/\/(files|changes|commits).*/, "")
+        const filesPageUrl = useNewExp ? `${prBasePath}/changes` : `${prBasePath}/files`
+        await resolveFilePathsFromFilesPage(filesPageUrl)
+      }
+
       primaryLinks.forEach(linkElement => {
-        const file = (linkElement.getAttribute("title") || linkElement.innerText)
+        const rawFile = (linkElement.getAttribute("title") ?? linkElement.innerText)
+          // strip left-to-right marks inserted by GitHub's new experience
+          .replace(/\u200E/g, "")
           .split("→") // when file was renamed
           .pop()
           ?.trim()
 
         // no file found
-        if (!file) return
+        if (!rawFile) return
+
+        // resolve truncated/incomplete paths using the cached diff-hash mapping
+        let file = rawFile
+        const href = linkElement.getAttribute("href")
+        const hash = href?.match(/#(diff-[a-f0-9]+)/)?.[1]
+        if (hash && diffHashToPathCache[hash]) {
+          file = diffHashToPathCache[hash]
+        }
 
         let lineNumberForFileBlock
 
-        const fileElement = linkElement.closest(inFilesChangedView ? ".file" : ".js-comment-container")
+        // find the containing file block
+        const fileElement = !inFilesChangedView
+          ? linkElement.closest(".js-comment-container")
+          : isNewFilesChangedView
+          ? linkElement.closest('div[id^="diff-"]')
+          : linkElement.closest(".file")
 
         if (fileElement) {
           if (!inFilesChangedView) {
@@ -178,11 +340,17 @@ const run = async () => {
 
             // get last line number
             lineNumberForFileBlock = lineNumberNodes[lineNumberNodes.length - 1].getAttribute("data-line-number")
+          } else if (isNewFilesChangedView) {
+            // new experience: find first addition/deletion code element, then get its row's line number
+            const firstChanged = fileElement.querySelector("code.addition, code.deletion")
+            const row = firstChanged?.closest("tr")
+            const lineNumCell = row?.querySelector("td.new-diff-line-number[data-line-number]")
+            lineNumberForFileBlock = lineNumCell?.getAttribute("data-line-number")
           } else {
+            // old experience
             const firstLineNumberNode = fileElement.querySelector(
               "td.blob-num-deletion[data-line-number], td.blob-num-addition[data-line-number]",
             )
-            // get first line number
             lineNumberForFileBlock = firstLineNumberNode?.getAttribute("data-line-number")
           }
         } else {
@@ -196,13 +364,25 @@ const run = async () => {
         ) {
           const editorIconElement = generateIconElement(repo, file, lineNumberForFileBlock)
 
-          linkElement.parentNode?.insertBefore(editorIconElement, null)
+          if (isNewFilesChangedView && inFilesChangedView) {
+            // new experience files changed: insert into the grandparent flex container (sibling of <h3>)
+            // so the icon sits inline in the flex row instead of below the block-level <h3>
+            const flexContainer = linkElement.closest('[class*="DiffFileHeader-module__file-path-section"]')
+            if (flexContainer && !flexContainer.querySelector(".open-in-ide-icon")) {
+              flexContainer.appendChild(editorIconElement)
+            }
+          } else {
+            linkElement.parentNode?.insertBefore(editorIconElement, null)
+          }
           addedIconsCounter++
         }
 
         // add icon on each line number
         if (OPTIONS.showIconOnLineNumbers && fileElement) {
-          const clickableLineNumbersNodes = fileElement.querySelectorAll("td.blob-num[data-line-number]")
+          // support both old (td.blob-num) and new (td.new-diff-line-number) experience
+          const clickableLineNumbersNodes = fileElement.querySelectorAll(
+            "td.blob-num[data-line-number], td.new-diff-line-number[data-line-number]",
+          )
 
           clickableLineNumbersNodes.forEach(lineNumberNode => {
             // don't add a new icon if icon already exists
@@ -240,9 +420,15 @@ const run = async () => {
   const styleNode = document.createElement("style")
 
   if (OPTIONS.showIconOnLineNumbers)
-    // hide file numbers on hover
+    // hide file numbers on hover to show the IDE icon instead
     styleNode.innerHTML += `tr:hover > td.js-open-in-ide-icon-added::before {
       display: none;
+    }
+    tr:hover > td.new-diff-line-number.js-open-in-ide-icon-added {
+      font-size: 0;
+    }
+    tr:hover > td.new-diff-line-number.js-open-in-ide-icon-added .open-in-ide-icon {
+      font-size: initial;
     }`
 
   document.head.appendChild(styleNode)
@@ -255,13 +441,13 @@ const run = async () => {
         if ((mutation.target as Element).querySelector(":scope > .open-in-ide-icon")) return
         debug("Detected page changes:")
         debug(mutation.target)
-        addEditorIcons()
+        void addEditorIcons()
         observeChanges()
       }),
     )
   })
 
-  addEditorIcons()
+  void addEditorIcons()
   observeChanges()
 
   // observe route change
