@@ -31,13 +31,25 @@
   margin-left: 2px;
 }
 
-/* position the icon correctly instead of the file number */
+/* position the icon correctly instead of the file number (old experience) */
 td.blob-num .open-in-ide-icon {
   justify-content: flex-end;
   margin-top: 1px;
 }
 
+/* position the icon centered over the line number (new experience) */
+td.new-diff-line-number .open-in-ide-icon {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  justify-content: center;
+  margin-top: 0;
+}
+
 /* hide the icon when cursor doesn't hover over the row */
-tr:not(:hover) td.blob-num .open-in-ide-icon {
+tr:not(:hover) td.blob-num .open-in-ide-icon,
+tr:not(:hover) td.new-diff-line-number .open-in-ide-icon {
   display: none;
 }
