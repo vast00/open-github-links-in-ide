@@ -68,6 +68,10 @@ Need a feature? Want to report a bug? Feel free to open an issue or a pull reque
 
 ## Changelog
 
+### Version 1.3.1 - August 26,2026
+
+- Fix bug: the line number icon no longer blocks clicking a line number to select it in PR diffs — only the icon itself is clickable now
+
 ### Version 1.3.0 - March 6,2026
 
 - Fix bug: resolve truncated file paths in conversation tab
