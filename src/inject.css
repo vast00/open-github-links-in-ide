@@ -48,6 +48,19 @@ td.new-diff-line-number .open-in-ide-icon {
   margin-top: 0;
 }
 
+/* let clicks pass through the icon container to the line number cell so
+   GitHub's line selection keeps working; only the icon image itself is
+   clickable (clicks on it bubble up to the container's click handler) */
+td.blob-num .open-in-ide-icon,
+td.new-diff-line-number .open-in-ide-icon {
+  pointer-events: none;
+}
+
+td.blob-num .open-in-ide-icon > img,
+td.new-diff-line-number .open-in-ide-icon > img {
+  pointer-events: auto;
+}
+
 /* hide the icon when cursor doesn't hover over the row */
 tr:not(:hover) td.blob-num .open-in-ide-icon,
 tr:not(:hover) td.new-diff-line-number .open-in-ide-icon {
