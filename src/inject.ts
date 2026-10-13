@@ -269,9 +269,10 @@ const run = async () => {
       let primaryLinks: NodeListOf<HTMLAnchorElement>
 
       if (isNewFilesChangedView) {
-        // new experience: file header links inside h3 DiffFileHeader
+        // new experience: file header links inside the h3 of each diff block
+        // (structural selector: GitHub's hashed CSS module class names change over time)
         primaryLinks = document.querySelectorAll<HTMLAnchorElement>(
-          '[class*="Diff-module__diff"] h3[class*="DiffFileHeader"] a.Link--primary',
+          '#diff-comparison-viewer-container div[id^="diff-"] h3 a.Link--primary[href^="#diff-"]',
         )
         // build path cache from the in-page file tree
         if (primaryLinks.length) {
@@ -304,7 +305,9 @@ const run = async () => {
       }
 
       primaryLinks.forEach(linkElement => {
-        const rawFile = (linkElement.getAttribute("title") ?? linkElement.innerText)
+        // textContent rather than innerText: diff blocks use content-visibility: auto,
+        // so innerText is empty for off-screen files
+        const rawFile = (linkElement.getAttribute("title") ?? linkElement.textContent ?? "")
           // strip left-to-right marks inserted by GitHub's new experience
           .replace(/\u200E/g, "")
           .split("→") // when file was renamed
@@ -367,7 +370,7 @@ const run = async () => {
           if (isNewFilesChangedView && inFilesChangedView) {
             // new experience files changed: insert into the grandparent flex container (sibling of <h3>)
             // so the icon sits inline in the flex row instead of below the block-level <h3>
-            const flexContainer = linkElement.closest('[class*="DiffFileHeader-module__file-path-section"]')
+            const flexContainer = linkElement.closest("h3")?.parentElement
             if (flexContainer && !flexContainer.querySelector(".open-in-ide-icon")) {
               flexContainer.appendChild(editorIconElement)
             }
